@@ -30,9 +30,12 @@ CLAUDE.md
 # Claude Code per-folder local settings (tool permission allowlist, etc).
 .claude/settings.local.json
 
-# macOS double-click shortcuts — personal developer convenience, not a
-# user-facing artifact of the agent.
+# macOS double-click shortcuts — Steve's personal Claude-Code-launcher
+# convenience files (e.g. "Open <agent> in Claude Code.command") stay local.
+# Exception: the "Run *.command" pattern is the user-facing agent launcher
+# and IS shipped — end users double-click it from Finder to run the agent.
 *.command
+!Run *.command
 
 # Internal handoff / design docs for in-flight refactors. Local-only;
 # the rationale they capture should land in commit messages and the
