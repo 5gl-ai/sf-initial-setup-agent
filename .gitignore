@@ -37,7 +37,19 @@ CLAUDE.md
 *.command
 !Run *.command
 
+# Compiled AppleScript launcher bundle. Built locally by setup.sh from
+# launcher.applescript. Not committed because (a) .app is a directory of
+# binaries that doesn't diff cleanly, (b) Drive sync handles bundle
+# directories inconsistently, (c) users on a different Mac should rebuild
+# from source rather than running a stale or partially-synced binary.
+*.app
+
 # Internal handoff / design docs for in-flight refactors. Local-only;
 # the rationale they capture should land in commit messages and the
 # decisions log, not in the public repo.
 HANDOFF-*.md
+
+# Local screenshots and design assets — typically captured to attach to
+# Claude Code sessions or internal docs, not for public distribution.
+Screenshot *.png
+Screenshot *.jpg

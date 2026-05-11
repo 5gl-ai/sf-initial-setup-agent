@@ -24,6 +24,18 @@ command -v sf >/dev/null || {
   npm install -g @salesforce/cli
 }
 
+# Compile the AppleScript-based launcher into a double-clickable .app
+# if it doesn't already exist (or is older than its source). End users
+# get a Dock-able icon that boots the agent silently without showing
+# a Terminal window. No code signing required for local-built apps.
+APP="Launch sf-initial-setup-agent.app"
+SRC="launcher.applescript"
+if [ -f "$SRC" ] && command -v osacompile >/dev/null; then
+  if [ ! -d "$APP" ] || [ "$SRC" -nt "$APP" ]; then
+    osacompile -o "$APP" "$SRC" && echo "Built $APP"
+  fi
+fi
+
 # The agent prompts for an Anthropic API key on first run if one isn't found
 # in the environment or ~/.5gl-agents-env, so no key check is needed here.
 
