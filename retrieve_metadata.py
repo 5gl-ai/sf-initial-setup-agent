@@ -627,20 +627,25 @@ def filter_members(
 # to `<project>/manifest/known-rejections.json` so the audit trail isn't lost.
 
 # Standard value sets that the Metadata API never retrieves regardless of
-# feature state. Configured via Setup → Data, not Metadata API.
+# feature state. AddressStateCode / AddressCountryCode are configured via
+# Setup → Data, not Metadata API. IdeaCategory1, IdeaMultiCategory,
+# QuestionOrigin1 are legacy versioned names (note the trailing `1`) that
+# are no longer retrievable even in orgs where the Idea/Question sObjects
+# exist — verified against stonyp-production on 2026-05-12 (Idea sObject
+# present with 7 records, but IdeaCategory1 still returns "Entity not found").
 ALWAYS_INACCESSIBLE_STANDARD_VALUE_SETS = {
     "AddressStateCode",
     "AddressCountryCode",
+    "IdeaCategory1",
+    "IdeaMultiCategory",
+    "QuestionOrigin1",
 }
 
 # Standard value sets retrievable only when the parent feature is enabled.
 # Map value-set fullName → sObject whose existence proxies the feature flag.
 FEATURE_GATED_STANDARD_VALUE_SETS = {
-    "IdeaCategory1": "Idea",
-    "IdeaMultiCategory": "Idea",
     "IdeaStatus": "Idea",
     "IdeaThemeStatus": "IdeaTheme",
-    "QuestionOrigin1": "Question",
     "QuoteStatus": "Quote",
     "InvoiceStatus": "Invoice",
     "WorkOrderStatus": "WorkOrder",
@@ -710,10 +715,18 @@ def apply_known_rejection_filters(
                     )
 
             elif type_name == "PlatformEventChannelMember":
-                # PEC member format: '<ChannelName>.<MemberName>'. Drop members
-                # whose channel name ends in 'VirtualChannel'.
-                channel = m.split(".", 1)[0] if "." in m else m
-                if channel.endswith(VIRTUAL_PLATFORM_EVENT_CHANNEL_SUFFIX):
+                # PEC member format: '<ChannelName>_<EventTypeName>'. Note the
+                # UNDERSCORE separator (not dot), e.g.
+                # 'ActivityEngagementVirtualChannel_TaskChangeEvent'.
+                # Drop members whose channel name part ends in 'VirtualChannel'.
+                # The channel part is everything before the last '_<...>ChangeEvent'
+                # or similar suffix — easier to just check whether the substring
+                # 'VirtualChannel_' appears anywhere in the member name.
+                if f"{VIRTUAL_PLATFORM_EVENT_CHANNEL_SUFFIX}_" in m:
+                    # Extract the channel name for the reason (everything before
+                    # the suffix occurrence).
+                    idx = m.find(f"{VIRTUAL_PLATFORM_EVENT_CHANNEL_SUFFIX}_")
+                    channel = m[: idx + len(VIRTUAL_PLATFORM_EVENT_CHANNEL_SUFFIX)]
                     drop_reason = (
                         "retrieve_not_allowed",
                         f"channel '{channel}' is an SF-internal virtual channel",
