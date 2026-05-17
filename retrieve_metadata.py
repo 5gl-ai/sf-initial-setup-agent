@@ -1217,12 +1217,18 @@ def _classify_message(problem: str) -> str:
 
 
 def _extract_warnings(result_obj: dict) -> list[dict]:
-    """Pull `result.messages` out of an sf retrieve JSON response and classify each.
+    """Pull warnings out of an sf retrieve JSON response and classify each.
+
+    Two sources:
+      1. `result.messages[*]` — the array of {problem, fileName} entries.
+      2. `result.files[*]` where `state == "Failed"` — per-entry failures with
+         their own `error` field. These often duplicate or supersede the
+         messages array (SF varies the surface across API versions).
 
     Returns a list of {category, file_name, problem, member} dicts. `member` is
-    the package-member that triggered the warning when SF gives it to us
-    (parsed out of file_name like 'unpackaged/package.xml' or
-    'unpackaged/ExperienceBundle') — best-effort, missing for terse messages.
+    the package-member that triggered the warning. For source (1) it's parsed
+    out of the problem text (best-effort, missing for terse messages). For
+    source (2) it's the entry's `fullName` (always set).
     """
     out: list[dict] = []
     for m in result_obj.get("messages", []) or []:
@@ -1242,18 +1248,46 @@ def _extract_warnings(result_obj: dict) -> list[dict]:
             "problem": problem,
             "member": member,
         })
+    for f in result_obj.get("files", []) or []:
+        if f.get("state") != "Failed":
+            continue
+        problem = f.get("error") or "(no error message)"
+        member = (f.get("fullName") or "").strip() or None
+        out.append({
+            "category": _classify_message(problem),
+            "file_name": "",
+            "problem": problem,
+            "member": member,
+        })
     return out
 
 
-def _present_top_level_members(files: list[dict]) -> set[tuple[str, str]]:
-    """Top-level (type, fullName) pairs from a retrieve's result.files entries.
+def _present_member_index(
+    files: list[dict],
+) -> tuple[set[tuple[str, str]], set[tuple[str, str]], dict[str, list[str]]]:
+    """Indices for matching manifest members against `result.files`.
 
-    Bundle and folder types return constituent files with slash-bearing
-    fullNames (e.g., 'Gulf_360_Portal1/routes/home.json'); only the prefix
-    before the first '/' is the top-level manifest member. The package.xml
-    entry is filtered out.
+    Returns `(exact, bundle_evidence, names_by_type)`:
+      - `exact`: `(type, fullName)` pairs as returned (no stripping).
+      - `bundle_evidence`: for entries whose fullName has a `/`, the
+        `(type, fullName-before-first-slash)` pair. Bundle child files
+        prove the bundle came back even when there's no top-level entry
+        for the bundle name itself.
+      - `names_by_type`: `{type: [fullName, ...]}` — used for suffix
+        matching against nested folder paths (SF returns Reports as
+        `Branded_Sales_Team_Reports/SalesOpsReporting2025/AndrewSkinner/Foo`
+        while `sf org list metadata` returns `AndrewSkinner/Foo`).
+
+    Entries with `state == "Failed"` are EXCLUDED from all three — they
+    didn't retrieve, so they shouldn't count as "present". Their failure
+    is captured separately by `_extract_warnings` (which now reads the
+    files[*].state=Failed entries too).
+
+    The `package.xml` entry and blank-type entries are filtered out.
     """
-    present: set[tuple[str, str]] = set()
+    exact: set[tuple[str, str]] = set()
+    bundle_evidence: set[tuple[str, str]] = set()
+    names_by_type: dict[str, list[str]] = {}
     for f in files or []:
         t = (f.get("type") or "").strip()
         name = (f.get("fullName") or "").strip()
@@ -1261,9 +1295,13 @@ def _present_top_level_members(files: list[dict]) -> set[tuple[str, str]]:
             continue
         if t == "Package" or name == "package.xml":
             continue
-        top = name.split("/", 1)[0]
-        present.add((t, top))
-    return present
+        if f.get("state") == "Failed":
+            continue
+        exact.add((t, name))
+        names_by_type.setdefault(t, []).append(name)
+        if "/" in name:
+            bundle_evidence.add((t, name.split("/", 1)[0]))
+    return exact, bundle_evidence, names_by_type
 
 
 def _silently_missing_members(
@@ -1275,17 +1313,60 @@ def _silently_missing_members(
 
     SF sometimes returns exit 0 with a partial result.files set and no entry
     in result.messages — most notably for ExperienceBundle when multiple
-    bundles share a retrieve. Anything missing from result.files AND not
-    named in a warning's `member` field is treated as silently dropped.
+    bundles share a retrieve.
+
+    A manifest member `(t, m)` is considered present if ANY of:
+      1. `(t, m)` is in the exact set.
+      2. `(t + "Folder", m)` is in the exact set — folder-based types
+         (Dashboard / Document / EmailTemplate / Report) return their
+         folder members under `<Type>Folder` in fileProperties even though
+         the manifest specifies them under `<Type>`.
+      3. The namespace-stripped form `(t, m.split("__", 1)[1])` is in
+         exact or bundle_evidence — managed-package members (e.g.,
+         `APXTConga4__Foo` in an AuraDefinitionBundle manifest) come back
+         under the unprefixed name in fileProperties.
+      4. `(t, m)` is in bundle_evidence — child files of a bundle named
+         `m` prove the bundle was retrieved.
+      5. Some fileProperty fullName for type `t` (or `t + "Folder"`)
+         ends with `/m` — SF returns nested folder paths (full ancestry)
+         while `sf org list metadata` returns short paths.
+
+    Anything that fails all five checks AND isn't named in a warning's
+    `member` field is treated as silently dropped.
     """
-    present = _present_top_level_members(files)
+    exact, bundle_evidence, names_by_type = _present_member_index(files)
     explained: set[str] = {w["member"] for w in warnings if w.get("member")}
     missing: list[tuple[str, str]] = []
     for type_name, members in chunk.members_by_type.items():
+        folder_type = type_name + "Folder"
+        names_for_type = names_by_type.get(type_name, [])
+        names_for_folder = names_by_type.get(folder_type, [])
         for m in members:
-            if (type_name, m) in present:
+            if (type_name, m) in exact:
+                continue
+            if (folder_type, m) in exact:
+                continue
+            if "__" in m:
+                m_stripped = m.split("__", 1)[1]
+                if (type_name, m_stripped) in exact:
+                    continue
+                if (type_name, m_stripped) in bundle_evidence:
+                    continue
+            if (type_name, m) in bundle_evidence:
+                continue
+            # Path-suffix match for nested folder paths. Boundary is `/` so
+            # we don't false-positive on e.g. manifest `Foo` matching
+            # fileProperty `MyFoo`.
+            needle = "/" + m
+            if any(n.endswith(needle) for n in names_for_type):
+                continue
+            if any(n.endswith(needle) for n in names_for_folder):
                 continue
             if m in explained:
+                continue
+            # Also check explained set for path-suffix matches (a failed-
+            # fileProperty with a long path explains a short-path manifest).
+            if any(e.endswith(needle) for e in explained if e):
                 continue
             missing.append((type_name, m))
     return missing
