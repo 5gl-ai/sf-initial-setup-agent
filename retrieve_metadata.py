@@ -1686,8 +1686,29 @@ def retrieve_one(
                 f"{sample}{more}"
             )
         else:
-            err = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:]
-            err_msg = err[0] if err else f"exit {proc.returncode}"
+            # Prefer the structured error from sf CLI's JSON stdout. sf emits
+            # `{"name": "...", "message": "..."}` to stdout on failure; stderr
+            # often only carries the "@salesforce/cli update available" banner,
+            # which is benign and masks the real failure when used as err_msg.
+            err_msg = None
+            try:
+                err_data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+                structured = err_data.get("message") or err_data.get("name")
+                if structured:
+                    err_msg = str(structured).splitlines()[0].strip()
+            except json.JSONDecodeError:
+                pass
+            if not err_msg:
+                stderr_lines = [
+                    ln for ln in (proc.stderr or "").splitlines()
+                    if ln.strip()
+                    and "@salesforce/cli update available" not in ln
+                    and not ln.lstrip().startswith("Node.js v")
+                ]
+                if stderr_lines:
+                    err_msg = stderr_lines[-1].strip()
+            if not err_msg:
+                err_msg = f"exit {proc.returncode}"
         emit("chunk_failed",
              chunk_id=chunk.chunk_id,
              type_label=chunk.type_label,
